@@ -15,7 +15,8 @@ require (
 	github.com/spf13/cobra v1.6.1 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/zclconf/go-cty v1.12.1 // indirect
-	golang.org/x/text v0.3.7 // indirect
+	golang.org/x/crypto v0.7.0 // indirect
+	golang.org/x/text v0.8.0 // indirect
 )
 
 replace github.com/hashicorp/hcl/v2 => github.com/apparentlymart/hcl/v2 v2.0.0-20220130182936-6e417e5d07f4
