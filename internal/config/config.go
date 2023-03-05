@@ -7,9 +7,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
+	"github.com/apparentlymart/oci-distribution-terraform-registry/internal/ocidist"
 	hcl "github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/gohcl"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
@@ -25,7 +25,7 @@ type Config struct {
 type ProviderMirror struct {
 	Name       string
 	OriginURL  *url.URL
-	NamePrefix string
+	NamePrefix ocidist.Namespace
 
 	DeclRange hcl.Range
 }
@@ -160,14 +160,16 @@ func decodeProviderMirror(block *hcl.Block) (*ProviderMirror, hcl.Diagnostics) {
 		}
 	}
 
-	ret.NamePrefix = config.NamePrefix.Value
-	if !ociNamePattern.MatchString(ret.NamePrefix) {
+	namePrefix, err := ocidist.ParseNamespace(config.NamePrefix.Value)
+	if err != nil {
 		diags = diags.Append(&hcl.Diagnostic{
 			Severity: hcl.DiagError,
 			Summary:  "Invalid OCI repository name prefix",
-			Detail:   "Must be one or more registry name segments separated by slashes.",
+			Detail:   fmt.Sprintf("Incorrect OCI distribution namespace syntax: %s.", err),
 			Subject:  config.NamePrefix.Range.Ptr(),
 		})
+	} else {
+		ret.NamePrefix = namePrefix
 	}
 
 	return ret, diags
@@ -249,5 +251,3 @@ var rootSchema = &hcl.BodySchema{
 		{Type: "server"},
 	},
 }
-
-var ociNamePattern = regexp.MustCompile(`[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*`)

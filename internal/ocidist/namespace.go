@@ -136,12 +136,12 @@ func (ns Namespace) String() string {
 	return buf.String()
 }
 
-// Append builds a new [Namespace] by appending another part to an existing
+// Append builds a new [Namespace] by appending additional parts to an existing
 // [Namespace].
-func (ns Namespace) Append(part NamespacePart) Namespace {
-	ret := make(Namespace, len(ns)+1)
+func (ns Namespace) Append(parts ...NamespacePart) Namespace {
+	ret := make(Namespace, len(ns)+len(parts))
 	copy(ret, ns)
-	return append(ret, part)
+	return append(ret, parts...)
 }
 
 func (np NamespacePart) String() string {

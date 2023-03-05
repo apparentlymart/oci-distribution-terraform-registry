@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/apparentlymart/oci-distribution-terraform-registry/internal/ocidist"
 	"github.com/google/go-cmp/cmp"
 	"github.com/hashicorp/hcl/v2"
 )
@@ -44,7 +45,7 @@ func TestLoadConfig(t *testing.T) {
 					Host:   "127.0.0.1:5000",
 					Path:   "/",
 				},
-				NamePrefix: "terraform-providers",
+				NamePrefix: ocidist.Namespace{"terraform-providers"},
 				DeclRange: hcl.Range{
 					Filename: "testdata/test.hcl",
 					Start:    hcl.Pos{Line: 2, Column: 3, Byte: 3},
