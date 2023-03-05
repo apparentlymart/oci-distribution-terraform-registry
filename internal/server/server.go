@@ -161,8 +161,80 @@ func providerMirrorHandler(cfg *config.ProviderMirror) (string, func(resp http.R
 			return
 		}
 
-		// TODO: Implement the rest of the protocol.
-		resp.WriteHeader(404)
+		// If the selector isn't "index" then it should be a version number
+		// previously included in a response from index.
+		{
+			version, err := versions.ParseVersion(selector)
+			if err != nil {
+				logger.Printf("unsupported selector %q for %s", selector, nsAddr)
+				resp.WriteHeader(404)
+				return
+			}
+			tag, err := ocidist.ParseReference(version.String())
+			if err != nil {
+				logger.Printf("version %s for %s uses version syntax that isn't valid OCI Distribution ref syntax", version, nsAddr)
+				resp.WriteHeader(404)
+				return
+			}
+			logger.Printf("fetch layers for %s:%s", nsAddr, tag)
+			manifest, err := ociClient.GetManifest(ctx, nsAddr, tag)
+			if err != nil {
+				propagateOCIDistError(err, resp)
+				return
+			}
+
+			if mt := manifest.Config.MediaType; mt != "application/vnd.hashicorp.terraform-provider.config.v1+json" {
+				logger.Printf("artifact %s %s has unsupported media type %s", nsAddr, tag, mt)
+				resp.WriteHeader(406)
+				return
+			}
+
+			type RespArchive struct {
+				URL    string   `json:"url"`
+				Hashes []string `json:"hashes,omitempty"`
+			}
+			type RespJSON struct {
+				Archives map[string]RespArchive `json:"archives"`
+			}
+			respJSON := RespJSON{make(map[string]RespArchive)}
+
+			for _, meta := range manifest.Layers {
+				if meta.MediaType != "application/vnd.hashicorp.terraform.provider-package+zip" {
+					continue // ignore any layer types other than our own
+				}
+				supportedPlatformsRaw, _ := meta.Annotations["io.terraform.target-platforms"].(string)
+				if supportedPlatformsRaw == "" {
+					continue // all packages should indicate which platforms they support
+				}
+				downloadURL := ociClient.BlobURL(nsAddr, meta.Digest)
+				respArchive := RespArchive{
+					URL: downloadURL.String(),
+				}
+				if meta.Digest.Algorithm() == "sha256" {
+					// Terraform's own "zh" ("ziphash") hashing scheme happens to
+					// be exactly compatible with OCI Distribution's sha256
+					// scheme, aside from the prefix, so we'll include this
+					// to help the client do an integrity check on what it
+					// has downloaded.
+					respArchive.Hashes = []string{"zh:" + meta.Digest.Encoded()}
+				}
+				for _, platform := range strings.Split(supportedPlatformsRaw, ",") {
+					respJSON.Archives[platform] = respArchive
+				}
+			}
+
+			respBytes, err := json.Marshal(respJSON)
+			if err != nil {
+				logger.Printf("failed to serialize JSON response: %s", err)
+				resp.WriteHeader(500)
+				return
+			}
+			resp.Header().Set("Content-Length", strconv.FormatInt(int64(len(respBytes)), 10))
+			resp.Header().Set("Content-Type", "application/json")
+			resp.WriteHeader(200)
+			resp.Write(respBytes)
+			return
+		}
 	}
 }
 
