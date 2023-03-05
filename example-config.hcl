@@ -3,8 +3,15 @@
 # since it doesn't use TLS, listens only on localhost and assumes you have an
 # OCI Distribution registry running on localhost port 5000.
 
+# provider_mirror defines a Terraform Provider Mirror Protocol service.
 provider_mirror "mirror" {
-  origin_url  = "http://127.0.0.1:5000/"
+  # The URL of the OCI Distribution registry containing the packages.
+  origin_url = "http://127.0.0.1:5000/"
+
+  # The namespace prefix where the provider package manifests will be
+  # registered. The provider's own address will be appended to this, so
+  # with the example value below the full namespace might be something
+  # like: terraform-providers/registry.terraform.io/hashicorp/aws .
   name_prefix = "terraform-providers"
 
   // If the underlying OCI Distribution registry requires a bearer token when
@@ -23,4 +30,11 @@ server {
   # safe from anyone who wouldn't otherwise be able to see authentication
   # tokens passing through the server in "Authorization" headers.
   query_string_secret = "0000000000000000000000000000000000000000000000000000000000000000"
+
+  # For a real server you'll need to use TLS, because Terraform requires that
+  # for some of its protocols.
+  #tls {
+  #  certificate_file = "certs.pem"
+  #  private_key_file = "private_key.pem"
+  #}
 }
