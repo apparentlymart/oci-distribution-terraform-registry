@@ -1,9 +1,12 @@
 package config
 
 import (
+	"crypto/tls"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -14,6 +17,7 @@ import (
 
 type Config struct {
 	ProviderMirrors map[string]*ProviderMirror
+	Server          *Server
 
 	Filename string
 }
@@ -24,6 +28,17 @@ type ProviderMirror struct {
 	NamePrefix string
 
 	DeclRange hcl.Range
+}
+
+type Server struct {
+	ListenAddr string
+	TLS        *TLSConfig
+
+	DeclRange hcl.Range
+}
+
+type TLSConfig struct {
+	Certificate tls.Certificate
 }
 
 func LoadConfigFile(filename string) (*Config, hcl.Diagnostics) {
@@ -66,9 +81,9 @@ func LoadConfig(src []byte, filename string) (*Config, hcl.Diagnostics) {
 			if existingRng, exists := namesUsed[mirror.Name]; exists {
 				moreDiags = moreDiags.Append(&hcl.Diagnostic{
 					Severity: hcl.DiagError,
-					Summary:  "Duplicate Service Name",
+					Summary:  "Duplicate service name",
 					Detail:   fmt.Sprintf("A service named %q was already declared at %s. Service names must be unique.", mirror.Name, existingRng),
-					Subject:  &block.DefRange,
+					Subject:  block.DefRange.Ptr(),
 				})
 			}
 			diags = append(diags, moreDiags...)
@@ -78,6 +93,20 @@ func LoadConfig(src []byte, filename string) (*Config, hcl.Diagnostics) {
 			}
 
 			ret.ProviderMirrors[mirror.Name] = mirror
+
+		case "server":
+			serverConfig, moreDiags := decodeServerConfig(block)
+			diags = append(diags, moreDiags...)
+			if ret.Server != nil {
+				diags = diags.Append(&hcl.Diagnostic{
+					Severity: hcl.DiagError,
+					Summary:  "Duplicate server configuration",
+					Detail:   fmt.Sprintf("The server was already configured at %s.", ret.Server.DeclRange),
+					Subject:  block.DefRange.Ptr(),
+				})
+				continue
+			}
+			ret.Server = serverConfig
 
 		default:
 			// Should not get here because only the cases above are in our schema.
@@ -144,9 +173,80 @@ func decodeProviderMirror(block *hcl.Block) (*ProviderMirror, hcl.Diagnostics) {
 	return ret, diags
 }
 
+func decodeServerConfig(block *hcl.Block) (*Server, hcl.Diagnostics) {
+	ret := &Server{
+		DeclRange: block.DefRange,
+	}
+
+	type TLSConfigHCL struct {
+		CertificateFile gohcl.WithRange[string] `hcl:"certificate_file"`
+		PrivateKeyFile  gohcl.WithRange[string] `hcl:"private_key_file"`
+	}
+	type Config struct {
+		ListenAddr gohcl.WithRange[*string] `hcl:"listen_addr"`
+		TLS        *TLSConfigHCL            `hcl:"tls,block"`
+	}
+	var config Config
+	diags := gohcl.DecodeBody(block.Body, nil, &config)
+	if diags.HasErrors() {
+		return ret, diags
+	}
+
+	if config.ListenAddr.Value != nil {
+		_, _, err := net.SplitHostPort(*config.ListenAddr.Value)
+		if err != nil {
+			diags = diags.Append(&hcl.Diagnostic{
+				Severity: hcl.DiagError,
+				Summary:  "Invalid listen address",
+				Detail:   "Listen address must be an IP address followed by a colon and then a port number.",
+				Subject:  config.ListenAddr.Range.Ptr(),
+			})
+		} else {
+			ret.ListenAddr = *config.ListenAddr.Value
+		}
+	}
+
+	if config.TLS != nil {
+		var tlsDiags hcl.Diagnostics
+
+		certFilename := config.TLS.CertificateFile.Value
+		keyFilename := config.TLS.PrivateKeyFile.Value
+		basePath := filepath.Dir(block.DefRange.Filename)
+		if !filepath.IsAbs(certFilename) {
+			certFilename = filepath.Join(basePath, certFilename)
+		}
+		if !filepath.IsAbs(keyFilename) {
+			keyFilename = filepath.Join(basePath, keyFilename)
+		}
+
+		diags = append(diags, tlsDiags...)
+		if !tlsDiags.HasErrors() {
+			tlsDiags = tlsDiags[:0]
+			cert, err := tls.LoadX509KeyPair(certFilename, keyFilename)
+			if err != nil {
+				tlsDiags = tlsDiags.Append(&hcl.Diagnostic{
+					Severity: hcl.DiagError,
+					Summary:  "Failed to parse TLS keypair",
+					Detail:   fmt.Sprintf("Cannot build a valid TLS configuration from the specified certificate and private key: %s.", err),
+					Subject:  config.TLS.CertificateFile.Range.Ptr(),
+				})
+			}
+			diags = append(diags, tlsDiags...)
+			if !tlsDiags.HasErrors() {
+				ret.TLS = &TLSConfig{
+					Certificate: cert,
+				}
+			}
+		}
+	}
+
+	return ret, diags
+}
+
 var rootSchema = &hcl.BodySchema{
 	Blocks: []hcl.BlockHeaderSchema{
 		{Type: "provider_mirror", LabelNames: []string{"name"}},
+		{Type: "server"},
 	},
 }
 

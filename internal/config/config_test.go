@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/tls"
 	"net/url"
 	"testing"
 
@@ -14,14 +15,27 @@ func TestLoadConfig(t *testing.T) {
 			origin_url  = "http://127.0.0.1:5000/"
 			name_prefix = "terraform-providers"
 		}
+
+		server {
+			listen_addr = ":8080"
+			tls {
+				certificate_file = "certs.pem"
+				private_key_file = "private_key.pem"
+			}
+		}
 	`)
 
-	gotConfig, diags := LoadConfig(src, "test.hcl")
+	cert, err := tls.LoadX509KeyPair("testdata/certs.pem", "testdata/private_key.pem")
+	if err != nil {
+		t.Fatalf("failed to load TLS certificate to test with: %s", err)
+	}
+
+	gotConfig, diags := LoadConfig(src, "testdata/test.hcl")
 	if diags.HasErrors() {
 		t.Fatalf("unexpected errors: %s", diags.Error())
 	}
 	wantConfig := &Config{
-		Filename: "test.hcl",
+		Filename: "testdata/test.hcl",
 		ProviderMirrors: map[string]*ProviderMirror{
 			"mirror": {
 				Name: "mirror",
@@ -32,10 +46,21 @@ func TestLoadConfig(t *testing.T) {
 				},
 				NamePrefix: "terraform-providers",
 				DeclRange: hcl.Range{
-					Filename: "test.hcl",
+					Filename: "testdata/test.hcl",
 					Start:    hcl.Pos{Line: 2, Column: 3, Byte: 3},
 					End:      hcl.Pos{Line: 2, Column: 27, Byte: 27},
 				},
+			},
+		},
+		Server: &Server{
+			ListenAddr: ":8080",
+			TLS: &TLSConfig{
+				Certificate: cert,
+			},
+			DeclRange: hcl.Range{
+				Filename: "testdata/test.hcl",
+				Start:    hcl.Pos{Line: 7, Column: 3, Byte: 118},
+				End:      hcl.Pos{Line: 7, Column: 9, Byte: 124},
 			},
 		},
 	}
