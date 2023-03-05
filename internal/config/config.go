@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/url"
@@ -23,9 +24,10 @@ type Config struct {
 }
 
 type ProviderMirror struct {
-	Name       string
-	OriginURL  *url.URL
-	NamePrefix ocidist.Namespace
+	Name          string
+	OriginURL     *url.URL
+	NamePrefix    ocidist.Namespace
+	ProxyPackages bool
 
 	DeclRange hcl.Range
 }
@@ -33,6 +35,8 @@ type ProviderMirror struct {
 type Server struct {
 	ListenAddr string
 	TLS        *TLSConfig
+
+	QueryStringSecret *[32]byte
 
 	DeclRange hcl.Range
 }
@@ -114,7 +118,26 @@ func LoadConfig(src []byte, filename string) (*Config, hcl.Diagnostics) {
 		}
 	}
 
+	diags = append(diags, validate(ret)...)
+
 	return ret, diags
+}
+
+func validate(cfg *Config) hcl.Diagnostics {
+	var diags hcl.Diagnostics
+
+	for _, mirror := range cfg.ProviderMirrors {
+		if mirror.ProxyPackages && cfg.Server.QueryStringSecret == nil {
+			diags = diags.Append(&hcl.Diagnostic{
+				Severity: hcl.DiagError,
+				Summary:  "Query string secret required for package proxy",
+				Detail:   "The proxy_packages option requires that you set the query_string_secret argument inside the server block, to provide a secret key used to authenticate package download requests.",
+				Subject:  mirror.DeclRange.Ptr(),
+			})
+		}
+	}
+
+	return diags
 }
 
 func decodeProviderMirror(block *hcl.Block) (*ProviderMirror, hcl.Diagnostics) {
@@ -124,8 +147,9 @@ func decodeProviderMirror(block *hcl.Block) (*ProviderMirror, hcl.Diagnostics) {
 	}
 
 	type Config struct {
-		OriginURL  gohcl.WithRange[string] `hcl:"origin_url"`
-		NamePrefix gohcl.WithRange[string] `hcl:"name_prefix"`
+		OriginURL     gohcl.WithRange[string] `hcl:"origin_url"`
+		NamePrefix    gohcl.WithRange[string] `hcl:"name_prefix"`
+		ProxyPackages bool                    `hcl:"proxy_packages"`
 	}
 	var config Config
 	diags := gohcl.DecodeBody(block.Body, nil, &config)
@@ -172,6 +196,8 @@ func decodeProviderMirror(block *hcl.Block) (*ProviderMirror, hcl.Diagnostics) {
 		ret.NamePrefix = namePrefix
 	}
 
+	ret.ProxyPackages = config.ProxyPackages
+
 	return ret, diags
 }
 
@@ -185,8 +211,9 @@ func decodeServerConfig(block *hcl.Block) (*Server, hcl.Diagnostics) {
 		PrivateKeyFile  gohcl.WithRange[string] `hcl:"private_key_file"`
 	}
 	type Config struct {
-		ListenAddr gohcl.WithRange[*string] `hcl:"listen_addr"`
-		TLS        *TLSConfigHCL            `hcl:"tls,block"`
+		ListenAddr        gohcl.WithRange[*string] `hcl:"listen_addr,optional"`
+		TLS               *TLSConfigHCL            `hcl:"tls,block"`
+		QueryStringSecret gohcl.WithRange[*string] `hcl:"query_string_secret,optional"`
 	}
 	var config Config
 	diags := gohcl.DecodeBody(block.Body, nil, &config)
@@ -205,6 +232,29 @@ func decodeServerConfig(block *hcl.Block) (*Server, hcl.Diagnostics) {
 			})
 		} else {
 			ret.ListenAddr = *config.ListenAddr.Value
+		}
+	}
+
+	if config.QueryStringSecret.Value != nil {
+		inHex := *config.QueryStringSecret.Value
+		if len(inHex) != 64 {
+			diags = diags.Append(&hcl.Diagnostic{
+				Severity: hcl.DiagError,
+				Summary:  "Invalid query string secret",
+				Detail:   "Must be exactly 64 hexadecimal digits, representing a 256-bit secret key.",
+				Subject:  config.QueryStringSecret.Range.Ptr(),
+			})
+		} else if raw, err := hex.DecodeString(inHex); err != nil {
+			diags = diags.Append(&hcl.Diagnostic{
+				Severity: hcl.DiagError,
+				Summary:  "Invalid query string secret",
+				Detail:   fmt.Sprintf("Must be exactly 64 hexadecimal digits, representing a 256-bit secret key: %s.", err),
+				Subject:  config.QueryStringSecret.Range.Ptr(),
+			})
+		} else {
+			var key [32]byte
+			copy(key[:], raw)
+			ret.QueryStringSecret = &key
 		}
 	}
 

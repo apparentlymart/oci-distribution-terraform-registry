@@ -101,11 +101,17 @@ func (c *Client) CheckAPISupport(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare request: %s", err)
 	}
+	for _, cb := range c.prepareReq {
+		err := cb(req)
+		if err != nil {
+			return RequestError{err}
+		}
+	}
 	resp, err := c.rawClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("request failed: %s", err)
+		return RequestError{err}
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		return errForResponse(resp)
 	}
@@ -173,6 +179,38 @@ func (c *Client) GetManifest(ctx context.Context, ns Namespace, ref Reference) (
 // registry, since no API translation is needed for that step.
 func (c *Client) BlobURL(ns Namespace, digest Digest) *url.URL {
 	return c.baseURL.JoinPath("v2", ns.String(), "blobs", digest.String())
+}
+
+// GetBlobContent returns a reader for the raw content of the blob with the
+// given digest, which the caller must close once done with it.
+//
+// Set authHeader to a non-empty string to force a particular value for the
+// Authorization header in the request, overriding any header field of that
+// name added by the configured request-preparing callbacks.
+func (c *Client) GetBlobContent(ctx context.Context, ns Namespace, digest Digest, authHeader string) (http.Header, io.ReadCloser, error) {
+	url := c.BlobURL(ns, digest)
+	req, err := http.NewRequest("GET", url.String(), nil)
+	if err != nil {
+		return nil, nil, RequestError{err}
+	}
+	for _, cb := range c.prepareReq {
+		err := cb(req)
+		if err != nil {
+			return nil, nil, RequestError{err}
+		}
+	}
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+	resp, err := c.rawClient.Get(url.String())
+	if err != nil {
+		return nil, nil, RequestError{err}
+	}
+	if resp.StatusCode != 200 {
+		defer resp.Body.Close()
+		return nil, nil, errForResponse(resp)
+	}
+	return resp.Header, resp.Body, nil
 }
 
 func (c *Client) newRequest(ctx context.Context, method string, urlParts ...string) (*http.Request, error) {

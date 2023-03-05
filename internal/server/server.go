@@ -1,13 +1,17 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/textproto"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -16,13 +20,23 @@ import (
 	"github.com/apparentlymart/oci-distribution-terraform-registry/internal/config"
 	"github.com/apparentlymart/oci-distribution-terraform-registry/internal/logging"
 	"github.com/apparentlymart/oci-distribution-terraform-registry/internal/ocidist"
+	"github.com/apparentlymart/oci-distribution-terraform-registry/internal/querysecret"
 )
 
 func Run(ctx context.Context, config *config.Config) error {
+	// Query string secret is optional, but the config package should validate
+	// that it always be set if any service will rely on it. Code below will
+	// assume that secreter is always non-nil if any features that use it are
+	// enabled.
+	var secreter *querysecret.Secreter
+	if config.Server.QueryStringSecret != nil {
+		secreter = querysecret.NewSecreter(*config.Server.QueryStringSecret)
+	}
+
 	mux := http.NewServeMux()
 
 	for _, mirrorSvc := range config.ProviderMirrors {
-		mux.HandleFunc(providerMirrorHandler(mirrorSvc))
+		mux.HandleFunc(providerMirrorHandler(mirrorSvc, secreter))
 	}
 
 	httpServer := &http.Server{
@@ -59,7 +73,7 @@ func Run(ctx context.Context, config *config.Config) error {
 	return httpServer.Shutdown(shutdownCtx)
 }
 
-func providerMirrorHandler(cfg *config.ProviderMirror) (string, func(resp http.ResponseWriter, req *http.Request)) {
+func providerMirrorHandler(cfg *config.ProviderMirror, secreter *querysecret.Secreter) (string, func(resp http.ResponseWriter, req *http.Request)) {
 	serviceName := cfg.Name
 	prefix := "/" + serviceName + "/"
 
@@ -70,9 +84,11 @@ func providerMirrorHandler(cfg *config.ProviderMirror) (string, func(resp http.R
 
 		ctx := req.Context()
 		originalReq := contextOriginalReq(ctx)
-		if a := originalReq.Header.Get("authorization"); a != "" {
-			// Pass through the Authorization header to the backend.
-			req.Header.Set("Authorization", a)
+		if originalReq != nil {
+			if a := originalReq.Header.Get("authorization"); a != "" {
+				// Pass through the Authorization header to the backend.
+				req.Header.Set("Authorization", a)
+			}
 		}
 
 		return nil
@@ -88,7 +104,9 @@ func providerMirrorHandler(cfg *config.ProviderMirror) (string, func(resp http.R
 	}
 
 	return prefix, func(resp http.ResponseWriter, req *http.Request) {
-		logger, done := logging.ContextLoggerRequest(req.Context(), "request to provider mirror: %s", req.URL)
+		urlNoQuery := *req.URL
+		urlNoQuery.RawQuery = ""
+		logger, done := logging.ContextLoggerRequest(req.Context(), "request to provider mirror: %s", &urlNoQuery)
 		defer done()
 
 		pathParts := strings.Split(req.URL.EscapedPath(), "/")
@@ -121,15 +139,80 @@ func providerMirrorHandler(cfg *config.ProviderMirror) (string, func(resp http.R
 			// Should always have exactly one remaining part, which specifies
 			// what about the selected address we are querying.
 			resp.WriteHeader(404)
+			return
 		}
 		selector := remainParts[0]
+
+		ctx := contextWithOriginalReq(req.Context(), req)
+
+		if cfg.ProxyPackages {
+			if selector == "download" {
+				// Our query string should contain an encrypted message that
+				// specifies both which object digest we're downloading and
+				// possibly an Authorization header value to use when fetching
+				// it.
+				qs := req.URL.RawQuery
+				if len(qs) == 0 {
+					logger.Print("missing query string to authenticate the download request")
+					resp.WriteHeader(404)
+					return
+				}
+				raw, err := secreter.Unwrap(qs)
+				if err != nil {
+					logger.Printf("invalid query string argument: %s", err)
+					resp.WriteHeader(404)
+					return
+				}
+				firstColon := bytes.IndexByte(raw, ':')
+				if firstColon == -1 {
+					resp.WriteHeader(404)
+					return
+				}
+				secondColon := firstColon + 1 + bytes.IndexByte(raw[firstColon+1:], ':')
+				if secondColon == -1 {
+					resp.WriteHeader(404)
+					return
+				}
+				digestStr := string(raw[:secondColon])
+				digest, err := ocidist.ParseDigest(digestStr)
+				if err != nil {
+					logger.Printf("query string has invalid digest %q: %s", digestStr, err)
+					resp.WriteHeader(404)
+					return
+				}
+
+				logger.Printf("proxying content for %s blob %s", nsAddr, digest)
+				authHeader := string(raw[secondColon+1:])
+				header, r, err := ociClient.GetBlobContent(ctx, nsAddr, digest, authHeader)
+				if err != nil {
+					propagateOCIDistError(err, resp)
+					return
+				}
+				defer r.Close()
+
+				// We'll copy over all of the server's content-related header
+				// fields, such as Content-Type, Content-Length, etc.
+				respHeader := resp.Header()
+				for n, vs := range header {
+					n = textproto.CanonicalMIMEHeaderKey(n)
+					if strings.HasPrefix(n, "Content-") {
+						respHeader[n] = vs
+					}
+				}
+
+				resp.WriteHeader(200)
+				io.Copy(resp, r)
+				return
+			}
+		}
+
 		if !strings.HasSuffix(selector, ".json") {
 			// All selectors always have a .json suffix in the protocol
 			resp.WriteHeader(404)
+			return
 		}
 		selector = selector[:len(selector)-5]
 
-		ctx := contextWithOriginalReq(req.Context(), req)
 		if selector == "index" {
 			logger.Printf("fetch tags for %s", nsAddr)
 			tags, err := ociClient.GetNamespaceTags(ctx, nsAddr)
@@ -206,7 +289,22 @@ func providerMirrorHandler(cfg *config.ProviderMirror) (string, func(resp http.R
 				if supportedPlatformsRaw == "" {
 					continue // all packages should indicate which platforms they support
 				}
-				downloadURL := ociClient.BlobURL(nsAddr, meta.Digest)
+				var downloadURL *url.URL
+				if cfg.ProxyPackages {
+					downloadURL = req.URL.JoinPath("../download")
+					authHeader := req.Header.Get("authorization")
+					var buf bytes.Buffer
+					fmt.Fprintf(&buf, "%s:%s", meta.Digest.String(), authHeader)
+					secret, err := secreter.Wrap(buf.Bytes())
+					if err != nil {
+						logger.Printf("failed to generate download authentication string: %s", err)
+						resp.WriteHeader(500)
+						return
+					}
+					downloadURL.RawQuery = secret
+				} else {
+					downloadURL = ociClient.BlobURL(nsAddr, meta.Digest)
+				}
 				respArchive := RespArchive{
 					URL: downloadURL.String(),
 				}

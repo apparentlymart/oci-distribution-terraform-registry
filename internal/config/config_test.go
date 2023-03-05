@@ -13,12 +13,14 @@ import (
 func TestLoadConfig(t *testing.T) {
 	src := []byte(`
 		provider_mirror "mirror" {
-			origin_url  = "http://127.0.0.1:5000/"
-			name_prefix = "terraform-providers"
+			origin_url     = "http://127.0.0.1:5000/"
+			name_prefix    = "terraform-providers"
+			proxy_packages = true
 		}
 
 		server {
-			listen_addr = ":8080"
+			listen_addr         = ":8080"
+			query_string_secret = "feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"
 			tls {
 				certificate_file = "certs.pem"
 				private_key_file = "private_key.pem"
@@ -45,7 +47,8 @@ func TestLoadConfig(t *testing.T) {
 					Host:   "127.0.0.1:5000",
 					Path:   "/",
 				},
-				NamePrefix: ocidist.Namespace{"terraform-providers"},
+				NamePrefix:    ocidist.Namespace{"terraform-providers"},
+				ProxyPackages: true,
 				DeclRange: hcl.Range{
 					Filename: "testdata/test.hcl",
 					Start:    hcl.Pos{Line: 2, Column: 3, Byte: 3},
@@ -55,13 +58,23 @@ func TestLoadConfig(t *testing.T) {
 		},
 		Server: &Server{
 			ListenAddr: ":8080",
+			QueryStringSecret: &[32]byte{
+				0xfe, 0xed, 0xfa, 0xce,
+				0xfe, 0xed, 0xfa, 0xce,
+				0xfe, 0xed, 0xfa, 0xce,
+				0xfe, 0xed, 0xfa, 0xce,
+				0xfe, 0xed, 0xfa, 0xce,
+				0xfe, 0xed, 0xfa, 0xce,
+				0xfe, 0xed, 0xfa, 0xce,
+				0xfe, 0xed, 0xfa, 0xce,
+			},
 			TLS: &TLSConfig{
 				Certificate: cert,
 			},
 			DeclRange: hcl.Range{
 				Filename: "testdata/test.hcl",
-				Start:    hcl.Pos{Line: 7, Column: 3, Byte: 118},
-				End:      hcl.Pos{Line: 7, Column: 9, Byte: 124},
+				Start:    hcl.Pos{Line: 8, Column: 3, Byte: 149},
+				End:      hcl.Pos{Line: 8, Column: 9, Byte: 155},
 			},
 		},
 	}
