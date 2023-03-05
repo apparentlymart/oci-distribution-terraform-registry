@@ -139,7 +139,7 @@ func (ns Namespace) String() string {
 // Append builds a new [Namespace] by appending additional parts to an existing
 // [Namespace].
 func (ns Namespace) Append(parts ...NamespacePart) Namespace {
-	ret := make(Namespace, len(ns)+len(parts))
+	ret := make(Namespace, len(ns), len(ns)+len(parts))
 	copy(ret, ns)
 	return append(ret, parts...)
 }

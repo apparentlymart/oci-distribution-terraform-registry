@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -11,8 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/apparentlymart/go-versions/versions"
 	"github.com/apparentlymart/oci-distribution-terraform-registry/internal/config"
 	"github.com/apparentlymart/oci-distribution-terraform-registry/internal/logging"
+	"github.com/apparentlymart/oci-distribution-terraform-registry/internal/ocidist"
 )
 
 func Run(ctx context.Context, config *config.Config) error {
@@ -60,6 +63,21 @@ func providerMirrorHandler(cfg *config.ProviderMirror) (string, func(resp http.R
 	serviceName := cfg.Name
 	prefix := "/" + serviceName + "/"
 
+	ociClient := ocidist.NewClient(cfg.OriginURL)
+	userAgent := fmt.Sprintf("oci-distribution-terraform-registry (provider mirror %q)", "serviceName")
+	ociClient.AddPrepareRequest(func(req *http.Request) error {
+		req.Header.Set("User-Agent", userAgent)
+
+		ctx := req.Context()
+		originalReq := contextOriginalReq(ctx)
+		if a := originalReq.Header.Get("authorization"); a != "" {
+			// Pass through the Authorization header to the backend.
+			req.Header.Set("Authorization", a)
+		}
+
+		return nil
+	})
+
 	advertiseHandler := func(resp http.ResponseWriter, req *http.Request) {
 		// TODO: A more elaborate page
 		content := "<!DOCTYPE html><html><title>Provider Mirror</title><body>This is a Terraform provider mirror.</body></html>"
@@ -70,7 +88,7 @@ func providerMirrorHandler(cfg *config.ProviderMirror) (string, func(resp http.R
 	}
 
 	return prefix, func(resp http.ResponseWriter, req *http.Request) {
-		_, done := logging.ContextLoggerRequest(req.Context(), "request to provider mirror: %s", req.URL)
+		logger, done := logging.ContextLoggerRequest(req.Context(), "request to provider mirror: %s", req.URL)
 		defer done()
 
 		pathParts := strings.Split(req.URL.EscapedPath(), "/")
@@ -82,11 +100,85 @@ func providerMirrorHandler(cfg *config.ProviderMirror) (string, func(resp http.R
 			return
 		}
 
+		if len(pathParts) < 5 {
+			// If there aren't at least five parts then there aren't enoough
+			// segments to encode a provider address.
+			resp.WriteHeader(404)
+			return
+		}
+
+		addrParts := pathParts[2:5]
+		nsAddr, err := ociDistNamespaceFromPathSegments(cfg.NamePrefix, addrParts)
+		if err != nil {
+			// Can't pass on address that uses characters not allowed by the
+			// underlying protocol.
+			logger.Printf("unsupported provider address: %s", err)
+			resp.WriteHeader(404)
+			return
+		}
+		remainParts := pathParts[5:]
+		if len(remainParts) != 1 {
+			// Should always have exactly one remaining part, which specifies
+			// what about the selected address we are querying.
+			resp.WriteHeader(404)
+		}
+		selector := remainParts[0]
+		if !strings.HasSuffix(selector, ".json") {
+			// All selectors always have a .json suffix in the protocol
+			resp.WriteHeader(404)
+		}
+		selector = selector[:len(selector)-5]
+
+		ctx := contextWithOriginalReq(req.Context(), req)
+		if selector == "index" {
+			logger.Printf("fetch tags for %s", nsAddr)
+			tags, err := ociClient.GetNamespaceTags(ctx, nsAddr)
+			if err != nil {
+				// TODO: Teach the client to return some different error codes
+				// so we can distinguish some different types of failure.
+				resp.WriteHeader(502)
+				return
+			}
+			type RespJSON struct {
+				Versions map[string]struct{} `json:"versions"`
+			}
+			respJSON := RespJSON{make(map[string]struct{})}
+			for _, tag := range tags {
+				v, err := versions.ParseVersion(tag.String())
+				if err != nil {
+					continue // Ignore tags that aren't version numbers
+				}
+				respJSON.Versions[v.String()] = struct{}{}
+			}
+			respBytes, err := json.Marshal(respJSON)
+			if err != nil {
+				logger.Printf("failed to serialize JSON response: %s", err)
+				resp.WriteHeader(500)
+				return
+			}
+			resp.Header().Set("Content-Length", strconv.FormatInt(int64(len(respBytes)), 10))
+			resp.Header().Set("Content-Type", "application/json")
+			resp.WriteHeader(200)
+			resp.Write(respBytes)
+			return
+		}
+
 		// TODO: Actually implement the mirror protocol.
 		resp.WriteHeader(404)
 	}
 }
 
-type contextKey string
-
-const remoteAddrContextKey = contextKey("remoteAddr")
+func ociDistNamespaceFromPathSegments(prefix ocidist.Namespace, segs []string) (ocidist.Namespace, error) {
+	if len(segs) == 0 {
+		return nil, fmt.Errorf("must provide at least one path segment")
+	}
+	ret := make([]ocidist.NamespacePart, len(segs))
+	for i, seg := range segs {
+		part, err := ocidist.ParseNamespacePart(seg)
+		if err != nil {
+			return nil, fmt.Errorf("segment %d: %w", i, err)
+		}
+		ret[i] = part
+	}
+	return prefix.Append(ret...), nil
+}
