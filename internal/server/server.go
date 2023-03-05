@@ -134,9 +134,7 @@ func providerMirrorHandler(cfg *config.ProviderMirror) (string, func(resp http.R
 			logger.Printf("fetch tags for %s", nsAddr)
 			tags, err := ociClient.GetNamespaceTags(ctx, nsAddr)
 			if err != nil {
-				// TODO: Teach the client to return some different error codes
-				// so we can distinguish some different types of failure.
-				resp.WriteHeader(502)
+				propagateOCIDistError(err, resp)
 				return
 			}
 			type RespJSON struct {
@@ -163,7 +161,7 @@ func providerMirrorHandler(cfg *config.ProviderMirror) (string, func(resp http.R
 			return
 		}
 
-		// TODO: Actually implement the mirror protocol.
+		// TODO: Implement the rest of the protocol.
 		resp.WriteHeader(404)
 	}
 }
@@ -181,4 +179,24 @@ func ociDistNamespaceFromPathSegments(prefix ocidist.Namespace, segs []string) (
 		ret[i] = part
 	}
 	return prefix.Append(ret...), nil
+}
+
+func propagateOCIDistError(err error, resp http.ResponseWriter) {
+	switch err {
+	case ocidist.ErrBadGateway:
+		resp.WriteHeader(502)
+	case ocidist.ErrUnauthorized:
+		resp.WriteHeader(401)
+	case ocidist.ErrTimeout:
+		resp.WriteHeader(504)
+	}
+
+	switch err.(type) {
+	case ocidist.NotFoundError:
+		resp.WriteHeader(404)
+	case ocidist.RequestError:
+		resp.WriteHeader(502)
+	default:
+		resp.WriteHeader(502)
+	}
 }

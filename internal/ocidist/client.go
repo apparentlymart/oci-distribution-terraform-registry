@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 )
@@ -105,6 +106,9 @@ func (c *Client) CheckAPISupport(ctx context.Context) error {
 		return fmt.Errorf("request failed: %s", err)
 	}
 	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return errForResponse(resp)
+	}
 	return nil
 }
 
@@ -205,9 +209,16 @@ func (c *Client) newRequestWithBody(ctx context.Context, method string, body io.
 func (c *Client) doRequestJSONResp(req *http.Request, into any) error {
 	resp, err := c.rawClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("request failed: %s", err)
+		if err == context.Canceled {
+			return ErrTimeout
+		}
+		return RequestError{err}
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return errForResponse(resp)
+	}
 
 	dec := json.NewDecoder(resp.Body)
 	err = dec.Decode(into)
@@ -218,4 +229,27 @@ func (c *Client) doRequestJSONResp(req *http.Request, into any) error {
 	// just ignore it. That would not be valid per the OCI Distribution spec
 	// but we'll tolerate it anyway because it doesn't hurt and is easier.
 	return nil
+}
+
+func errForResponse(resp *http.Response) error {
+	switch resp.StatusCode {
+	case 401, 403:
+		return ErrUnauthorized
+	case 404:
+		var jsonErr json.RawMessage
+		ty, _, err := mime.ParseMediaType(resp.Header.Get("content-type"))
+		if err == nil && ty == "application/json" {
+			errSrc, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return ErrBadGateway
+			}
+			err = json.Unmarshal(errSrc, &jsonErr)
+			if err != nil {
+				return ErrBadGateway
+			}
+		}
+		return NotFoundError{JSONDesc: jsonErr}
+	default:
+		return ErrBadGateway
+	}
 }
